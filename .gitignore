@@ -1,0 +1,11 @@
+.vscode/
+data/
+results/
+__pycache__/
+figs/
+outs/
+log/
+
+
+
+
