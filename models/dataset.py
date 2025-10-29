@@ -1,4 +1,6 @@
 import numpy as np
+import trimesh
+from matplotlib import cm, colors
 from scipy.spatial import cKDTree
 from tools.utils import (
     extract_np,
@@ -9,8 +11,9 @@ from torch.utils.data import Dataset
 
 
 class Dataset(Dataset):
-    def __init__(self, conf, dataset, dataname):
+    def __init__(self, conf, dataset, dataname, stage):
         super().__init__()
+        self.stage = stage
         self.conf = conf
         self.data_dir = conf.get_string("general.data_dir") + dataset + "/"
 
@@ -18,10 +21,9 @@ class Dataset(Dataset):
         self.datalength = conf.get_int("train.datalength")
         self.metric = conf.get_string("train.metric")
         self.time_sum = conf.get_int("train.time_sum")
-        # self.points = load_input(self.data_dir, dataname)
-        self.points, normals, _, self.error_pointcloud = load_input(self.data_dir, dataname)
-        self.normals = normals
-        # self.normals = normals_pca
+        self.points, gt_normals, _, self.error_pointcloud = load_input(self.data_dir, dataname)
+        self.normals = []
+        self.gt_normals = gt_normals
         self.num_points = self.points.shape[0]
         self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
@@ -44,7 +46,13 @@ class Dataset(Dataset):
         sample = sample_surface + theta_guassian * sample_sigmas * noise
         # sample_near = self.projection(sample)
         # sample_near = self.bilateral_projection_protection(sample)
-        sample_near = self.average_projection(sample)
+
+        if self.stage == 1:
+            sample_near_index = self.kd_tree.query(sample, k=1)[1]
+            sample_near = self.points[sample_near_index]
+        else:
+            sample_near_index = self.kd_tree.query(sample, k=1)[1]
+        sample_near = self.points[sample_near_index]
         res = sample - sample_near  # (N,3)
         time = np.random.randint(0, self.time_sum, size=(train_num_points, 1))
 
@@ -83,6 +91,48 @@ class Dataset(Dataset):
 
     def get_error_pointcloud(self):
         return self.error_pointcloud
+
+    def get_new_pointcloud(self, extra_points, extra_normals):
+        self.extra_kdtree = cKDTree(extra_points)
+        extra_idx = self.extra_kdtree.query(self.points, k=1)[1]
+        self.normals = extra_normals[extra_idx].astype(np.float32)
+        # 计算点云法线图
+        ni = self.normals.copy()
+        n_gt = self.gt_normals.copy()
+        ni /= np.linalg.norm(ni, axis=1, keepdims=True) + 1e-12
+        n_gt /= np.linalg.norm(n_gt, axis=1, keepdims=True) + 1e-12
+        cos_val = np.sum(ni * n_gt, axis=1)
+        cos_val = np.clip(np.abs(cos_val), 0.0, 1.0)
+        angle_deg = np.degrees(np.arccos(cos_val))
+
+        # --- 3. 颜色映射 (Matplotlib + Numpy) ---
+        vmax_deg = 60.0
+        norm = colors.Normalize(vmin=0.0, vmax=float(vmax_deg))
+        cmap = cm.get_cmap("jet")
+        # 'col' 是 [0, 1] 范围的 float
+        col = cmap(norm(np.clip(angle_deg, 0.0, vmax_deg)))[:, :3]
+
+        # 转换为 [0, 255] 范围的 uint8
+        col_uint8 = (col * 255).astype(np.uint8)
+
+        # --- 4. 创建 Trimesh 点云对象 (Trimesh) ---
+        estimate_error_pointcloud = trimesh.points.PointCloud(vertices=self.points, colors=col_uint8)
+
+        self.normals = np.concatenate([self.normals, extra_normals], axis=0)
+        self.points = np.concatenate([self.points, extra_points], axis=0)
+        self.num_points = self.points.shape[0]
+        self.normalize()
+        self.sigmas = self.sample_gaussian_noise_around_shape()
+        self.kd_tree = cKDTree(self.points)
+        return estimate_error_pointcloud
+
+    def set_point_cloud(self, points, normals):
+        self.points = points
+        self.normals = normals
+        self.num_points = self.points.shape[0]
+        self.normalize()
+        self.sigmas = self.sample_gaussian_noise_around_shape()
+        self.kd_tree = cKDTree(self.points)
 
     def bilateral_projection(self, query, k=10, sigma_p=None, sigma_n=None):
         M = query.shape[0]

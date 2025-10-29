@@ -93,11 +93,20 @@ class Runner:
         self.dataname = args.dataname
         self.base_exp_dir = Path(self.conf["general.base_exp_dir"]) / args.dir / args.dataname
         self.base_exp_dir.mkdir(parents=True, exist_ok=True)
-        self.dataset = Dataset(self.conf, self.dir, self.dataname)
-        self.GT_points = torch.from_numpy(self.dataset.points).to(self.device)
+        self.dataset_stage_1 = Dataset(self.conf, self.dir, self.dataname, stage=1)
+        self.dataset_stage_2 = Dataset(self.conf, self.dir, self.dataname, stage=2)
+        self.GT_points = torch.from_numpy(self.dataset_stage_1.points).to(self.device)
         self.batch_size = self.conf.get_int("train.batch_size")
-        self.dataloader = torch.utils.data.DataLoader(
-            self.dataset,
+        self.dataloader_stage_1 = torch.utils.data.DataLoader(
+            self.dataset_stage_1,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+        self.dataloader_stage_2 = torch.utils.data.DataLoader(
+            self.dataset_stage_2,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=4,
@@ -106,7 +115,10 @@ class Runner:
         )
 
         self.datalength = self.conf.get_int("train.datalength")
-        self.epochs = self.conf.get_int("train.epochs")
+        # self.epochs = self.conf.get_int("train.epochs")
+        self.epochs_stage_1 = self.conf.get_int("train.epochs_stage_1")
+        self.epochs_stage_2 = self.conf.get_int("train.epochs_stage_2")
+        self.epochs = self.epochs_stage_1 + self.epochs_stage_2
         self.metric = self.conf.get_string("train.metric")
         self.epoch_step = 0
 
@@ -141,7 +153,7 @@ class Runner:
             logger=self.logger,
         )
         print_log(
-            f"Dataset: Bounding Box:{self.dataset.bbox} \n Center:{self.dataset.shape_center} \n Scale:{self.dataset.shape_scale}",
+            f"Dataset: Bounding Box:{self.dataset_stage_1.bbox} \n Center:{self.dataset_stage_1.shape_center} \n Scale:{self.dataset_stage_1.shape_scale}",
             logger=self.logger,
         )
         (self.base_exp_dir / "pointcloud").mkdir(parents=True, exist_ok=True)
@@ -164,10 +176,104 @@ class Runner:
         # batch是最大的范围,表示一共训练多少轮
         # iter是从dataloader中取数据的次数
         # 一个batch有多少个iter由dataloader的长度决定,len(dataloader)=len(dataset)/batchsize
-        for _ in range(self.epoch_step, self.epochs):
+        self.stage = 1
+        while self.epoch_step < self.epochs_stage_1:
             # For each batch in the dataloader
-            for _, data in enumerate(self.dataloader):
+            # Stage 1 生成新的点
+            for _, data in enumerate(self.dataloader_stage_1):
                 # data [4,5000,3]
+                self.update_learning_rate(self.epoch_step)
+                (
+                    sample,
+                    sample_time,
+                    sample_near,
+                    time,
+                    res,
+                ) = (
+                    data["sample"].to(self.device),
+                    data["sample_time"].to(self.device),
+                    data["sample_near"].to(self.device),
+                    data["time"].to(self.device),
+                    data["res"].to(self.device),
+                )
+                # sample_gaussian_moved
+                sample_time.requires_grad = True
+                pred_gradients = self.udf_network.gradient(sample_time, time)  # 4*5000x3
+                pred_res_udf = self.udf_network.res_udf(sample_time, time)  # 4*5000x1
+                pred_grad_norm = F.normalize(pred_gradients, dim=-1)  # 4*5000x3
+                pred_res = pred_res_udf * pred_grad_norm
+                loss_res = F.l1_loss(pred_res, res)
+                losses = {
+                    "res": loss_res,
+                }
+
+                # Calculate total loss
+                total_loss = sum(losses.values())
+                losses["total"] = total_loss
+
+                # Log losses to tensorboard
+                for loss_name, loss_value in losses.items():
+                    self.writer.add_scalar(f",Loss/{loss_name}", loss_value.item(), self.epoch_step)
+
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                self.optimizer.step()
+            self.epoch_step += 1
+            if self.epoch_step % self.report_freq == 0:
+                for loss_name, loss_value in losses.items():
+                    self.writer.add_scalar(f"Loss/{loss_name}", loss_value.item(), self.epoch_step)
+                # Create dynamic loss string from dictionary
+                loss_str = ", ".join([f"loss:{name} = {value:.6e}" for name, value in losses.items()])
+                print_log(
+                    "stage-1{}_{} epoch:{:8>d} {} lr={:.6e}".format(
+                        self.dataname,
+                        self.time_sum,
+                        self.epoch_step,
+                        loss_str,
+                        self.optimizer.param_groups[0]["lr"],
+                    ),
+                    logger=logger,
+                )
+        self.save_checkpoint()
+        if self.epoch_step == self.epochs_stage_1:
+            self.stage = 2
+            print_log("进入第二阶段训练", logger=self.logger)
+            extra_points, extra_normals = self.get_extra_points(self.extra_points)
+            estimate_error_pointcloud = self.dataset_stage_2.get_new_pointcloud(extra_points, extra_normals)
+            estimate_error_pointcloud_path = (
+                self.base_exp_dir / "pointcloud" / f"estimate_error_cloud{self.epoch_step}_{self.time_sum}epoch.ply"
+            )
+            # 创建点云对象
+            estimate_error_pointcloud.export(estimate_error_pointcloud_path)
+            print_log(
+                f"Estimate_Error_Point cloud saved successfully at epoch {self.epoch_step}. File path: {estimate_error_pointcloud_path}",
+                logger=self.logger,
+            )
+            new_point_cloud = trimesh.Trimesh(
+                vertices=self.dataset_stage_2.points,
+            )
+            new_point_cloud_path = (
+                self.base_exp_dir / "pointcloud" / f"new_point_cloud{self.epoch_step}_{self.time_sum}epoch.ply"
+            )
+            new_point_cloud.export(new_point_cloud_path)
+            print_log(
+                f"new_Point cloud saved successfully at epoch {self.epoch_step}. File path: {new_point_cloud_path}",
+                logger=self.logger,
+            )
+            self.epoch_step += 1
+            self.save_checkpoint()
+            self.extract_mesh(
+                resolution=args.mcube_resolution,
+                threshold=0.005,
+                point_gt=self.GT_points,
+                epoch_step=self.epoch_step,
+                time_sum=self.time_sum,
+            )
+            self.evaluate()
+
+        while self.epoch_step < self.epochs:
+            # data [4,5000,3]
+            for _, data in enumerate(self.dataloader_stage_2):
                 self.update_learning_rate(self.epoch_step)
                 (
                     sample,  # noqa: F841
@@ -199,7 +305,7 @@ class Runner:
 
                 # Log losses to tensorboard
                 for loss_name, loss_value in losses.items():
-                    self.writer.add_scalar(f"Loss/{loss_name}", loss_value.item(), self.epoch_step)
+                    self.writer.add_scalar(f",Loss/{loss_name}", loss_value.item(), self.epoch_step)
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -211,7 +317,7 @@ class Runner:
                 # Create dynamic loss string from dictionary
                 loss_str = ", ".join([f"loss:{name} = {value:.6e}" for name, value in losses.items()])
                 print_log(
-                    "{}_{} epoch:{:8>d} {} lr={:.6e}".format(
+                    "stage-2{}_{} epoch:{:8>d} {} lr={:.6e}".format(
                         self.dataname,
                         self.time_sum,
                         self.epoch_step,
@@ -220,16 +326,14 @@ class Runner:
                     ),
                     logger=logger,
                 )
-
         self.save_checkpoint()
         self.gen_cube_pointcloud(self.epoch_step, self.time_sum)
 
         self.extract_mesh(
             resolution=args.mcube_resolution,
-            threshold=0.0,
+            threshold=0.005,
             point_gt=self.GT_points,
             epoch_step=self.epoch_step,
-            logger=logger,
             time_sum=self.time_sum,
         )
         self.evaluate()
@@ -277,7 +381,7 @@ class Runner:
         if self.conf.get_float("train.far") > 0:
             mesh = remove_far(point_gt.detach().cpu().numpy(), mesh, self.conf.get_float("train.far"))
 
-        mesh_path = out_dir + "/" + str(epoch_step) + "_" + str(time_sum) + "epoch" + "_mesh.obj"
+        mesh_path = out_dir / f"{epoch_step}_{time_sum}epoch_mesh.obj"
         mesh.export(mesh_path)
 
         print_log(
@@ -342,8 +446,13 @@ class Runner:
             map_location=self.device,
         )
         print(checkpoint_path)
+        self.stage = checkpoint["stage"]
+        if self.stage == 1:
+            self.dataset = self.dataset_stage_1
+        else:
+            self.dataset = self.dataset_stage_2
         self.udf_network.load_state_dict(checkpoint["udf_network_fine"])
-
+        self.dataset.set_point_cloud(checkpoint["points"], checkpoint["normals"])
         self.epoch_step = checkpoint["epoch_step"]
         print_log(
             f"Checkpoint loaded successfully at epoch {self.epoch_step}.",
@@ -351,9 +460,16 @@ class Runner:
         )
 
     def save_checkpoint(self):
+        if self.stage == 1:
+            self.dataset = self.dataset_stage_1
+        else:
+            self.dataset = self.dataset_stage_2
         checkpoint = {
             "udf_network_fine": self.udf_network.state_dict(),
             "epoch_step": self.epoch_step,
+            "points": self.dataset.points,
+            "normals": self.dataset.normals,
+            "stage": self.stage,
         }
         checkpoint_dir = self.base_exp_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -365,6 +481,38 @@ class Runner:
             f"Checkpoint saved successfully at epoch {self.epoch_step}.",
             logger=self.logger,
         )
+
+    def get_extra_points(self, extra_points):
+        batch_size = 10000
+        all_extra_points = []
+        all_extra_normals = []
+        num_collected_points = 0
+        # 计算当前批次需要生成的点数
+        # 确保总数不会超过 target_points
+        while num_collected_points < extra_points:
+            current_batch_size = min(batch_size, extra_points - num_collected_points)
+            current_indices = np.random.choice(self.dataset_stage_1.points.shape[0], current_batch_size, replace=True)
+            # Gaussian noise points
+            sample_surface = self.dataset_stage_1.points[current_indices]
+            sample_sigmas = self.dataset_stage_1.sigmas[current_indices]
+            theta_guassian = 0.25
+            noise = np.random.normal(0.0, 1.0, size=(current_indices.shape[0], 3)).astype(np.float32)
+            sample = sample_surface + theta_guassian * sample_sigmas * noise
+            sample = torch.from_numpy(sample).to(self.device).float()
+            sample.requires_grad = True
+            _, sample_normal, sample_near = self.udf_network.predict(sample, self.time_sum, self.metric)
+            sample_near = sample_near.detach().cpu().numpy()
+            sample_normal = sample_normal.detach().cpu().numpy()
+            gt_kd_tree = self.dataset_stage_1.kd_tree
+            distances, _ = gt_kd_tree.query(sample_near, p=2, distance_upper_bound=0.003)
+            sample_near = sample_near[distances < 0.003]
+            sample_normal = sample_normal[distances < 0.003]
+            all_extra_points.append(sample_near)
+            all_extra_normals.append(sample_normal)
+            num_collected_points += sample_near.shape[0]
+        all_extra_points = np.concatenate(all_extra_points, axis=0)
+        all_extra_normals = np.concatenate(all_extra_normals, axis=0)
+        return all_extra_points, all_extra_normals
 
     def evaluate(self, sample_num=100000):
         data_dir = Path(self.conf.get_string("general.data_dir"))

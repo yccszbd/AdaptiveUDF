@@ -1,9 +1,10 @@
 # tools/slice.py
 import os
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import trimesh
-import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
@@ -12,7 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 # --------------------------------------------------
 def _load_normalize_mesh(path_prefix):
     for ext in (".ply", ".obj", ".xyz"):
-        path = path_prefix + ext
+        path = path_prefix.with_suffix(ext)
         if os.path.isfile(path):
             return trimesh.load_mesh(path)
     raise FileNotFoundError(f"找不到模型: {path_prefix}.[ply|obj|xyz]")
@@ -22,9 +23,7 @@ def _auto_bbox(field_func, mesh=None, device="cuda", n_samples=100000):
     # ### GRAD-MOD ① ###  去掉内部 torch.no_grad()
     pts = torch.rand(n_samples, 3, device=device) * 2 - 1
     vals = field_func(pts)  # 可能带梯度
-    mask = (
-        (vals < 0.05) if vals.numel() > 100 else torch.ones_like(vals, dtype=torch.bool)
-    )
+    mask = (vals < 0.05) if vals.numel() > 100 else torch.ones_like(vals, dtype=torch.bool)
     if mask.sum() < 10:
         fallback = np.array([[-1, -1, -1], [1, 1, 1]], dtype=np.float32)
         return fallback[0], fallback[1]
@@ -101,10 +100,10 @@ def _should_flip(mesh, axis_id, a1, a2):
     len1, len2 = extents[a1], extents[a2]
     if axis_id == 0:  # X 切片
         return (len1 < len2), False
-    elif axis_id == 1:  # Y 切片
+    if axis_id == 1:  # Y 切片
         return False, (len1 > len2)
-    else:  # Z 切片
-        return False, False
+    # Z 切片
+    return False, False
 
 
 def _auto_flip_vote(
@@ -229,9 +228,7 @@ def save_field_slices(
         center = (bbox_min + bbox_max) / 2
         half = (bbox_max - bbox_min) / 2 * extent_ratio
         bbox_min, bbox_max = center - half, center + half
-        print(
-            f"[slice] extent_ratio={extent_ratio} -> 缩放后 bbox min={bbox_min}, max={bbox_max}"
-        )
+        print(f"[slice] extent_ratio={extent_ratio} -> 缩放后 bbox min={bbox_min}, max={bbox_max}")
 
     # ---- 2.3 切片高度 ----
     if levels is None:
@@ -418,9 +415,7 @@ def save_field_slices(
             plane_normal[axis_id] = 1
             plane_origin = [0, 0, 0]
             plane_origin[axis_id] = float(lvl)
-            sec = pred_mesh.section(
-                plane_normal=plane_normal, plane_origin=plane_origin
-            )
+            sec = pred_mesh.section(plane_normal=plane_normal, plane_origin=plane_origin)
             if sec is not None:
                 for ent in sec.entities:
                     path = ent.discrete(sec.vertices)

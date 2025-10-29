@@ -13,14 +13,14 @@ start_time=$(date +%s)
 
 # 1. 参数列表
 dataname=(
-# 27d42437168ccd7ddd75f724c0ccbe00
-# 2a9b4308929f91a6e1007bcfcf09901
-# 3bfa196d1b48f1e0c5dccef20baf829a
-# 4235a8f0f7b92ebdbfea8bc24170a935
-# 666beb2570f33c64f64801ad2940cdd5
-# b8f6994a33f4f1adbda733a39f84326d
-# bc75e8adfee9ad70bda733a39f84326d
-# f34c03711c3fc44ac10e9d4ee4bae4f4
+27d42437168ccd7ddd75f724c0ccbe00
+2a9b4308929f91a6e1007bcfcf09901
+3bfa196d1b48f1e0c5dccef20baf829a
+4235a8f0f7b92ebdbfea8bc24170a935
+666beb2570f33c64f64801ad2940cdd5
+b8f6994a33f4f1adbda733a39f84326d
+bc75e8adfee9ad70bda733a39f84326d
+f34c03711c3fc44ac10e9d4ee4bae4f4
 f4440b2cecde4131afe1d4530f4c6e24
 fffb1660a38af30ba4cf3601fb6b2442
 )
@@ -35,7 +35,7 @@ echo "===== $(date) : 开始全部训练，日志写入 ${logfile} =====" >> "$l
 for h in "${dataname[@]}"; do 
     echo "===== $(date) : 启动 shapenetCars ${h} =====" >> "$logfile"
     stdbuf -oL -eL python run.py \
-        --gpu 1 \
+        --gpu 0 \
         --conf "confs/shapenet_cars.conf" \
         --dir "shapenetCars" \
         --dataname "$h" \
