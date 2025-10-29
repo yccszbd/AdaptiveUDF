@@ -288,7 +288,9 @@ def start_process_pool(worker_function, parameters, num_processes):
             results = []
             for c in parameters:
                 return [worker_function(*c) for c in parameters]
-        print(f"Running loop for {worker_function!s} with {len(parameters)} calls on {num_processes} subprocess workers")
+        print(
+            f"Running loop for {worker_function!s} with {len(parameters)} calls on {num_processes} subprocess workers"
+        )
         with multiprocessing.Pool(processes=num_processes, maxtasksperchild=1) as pool:
             results = pool.starmap(worker_function, parameters)
             return results
@@ -346,7 +348,7 @@ def info_CD(chamfer_dist, xyz1, xyz2, tau=0.5, lam=1e-7):
 def load_input(data_dir, dataname, k_neighbors=30):
     """
     加载点云 (.npy/.xyz/.ply),统一用 PCA(KNN) 估计法线。
-    如果输入自带法线 -> 计算与 PCA 法线的角度误差并上色,返回带颜色的点云。
+    如果输入自带法线 -> 计算与 PCA 法线的角度误差并上色,返回带颜色的点云和误差统计。
     如果输入不含法线 -> 返回空点云。
 
     参数:
@@ -359,13 +361,15 @@ def load_input(data_dir, dataname, k_neighbors=30):
 
     返回:
         points : (N,3) ndarray
+        normals : (N,3) ndarray or None
         normals_pca : (N,3) ndarray
-        pcd 或 error_pcd : o3d.geometry.PointCloud / trimesh.points.PointCloud
+        error_pcd : trimesh.points.PointCloud
+        error_stats : dict (包含平均误差等统计)
     """
     file_base = Path(data_dir) / "input" / dataname
     points, normals = None, None
 
-    # 1) NPY 文件
+    # ---------- 1) NPY 文件 ----------
     if (npy_file := file_base.with_suffix(".npy")).exists():
         arr = np.load(npy_file)
         if arr.ndim != 2 or arr.shape[1] < 3:
@@ -374,7 +378,7 @@ def load_input(data_dir, dataname, k_neighbors=30):
         if arr.shape[1] >= 6:
             normals = arr[:, 3:6].astype(np.float32)
 
-    # 2) XYZ 文件
+    # ---------- 2) XYZ 文件 ----------
     elif (xyz_file := file_base.with_suffix(".xyz")).exists():
         arr = np.loadtxt(xyz_file)
         if arr.ndim != 2 or arr.shape[1] < 3:
@@ -382,7 +386,7 @@ def load_input(data_dir, dataname, k_neighbors=30):
         points = arr[:, :3].astype(np.float32)
         normals = None
 
-    # 3) PLY 文件
+    # ---------- 3) PLY 文件 ----------
     elif (ply_file := file_base.with_suffix(".ply")).exists():
         pcd = o3d.io.read_point_cloud(str(ply_file))
         points = np.asarray(pcd.points, dtype=np.float32)
@@ -392,28 +396,40 @@ def load_input(data_dir, dataname, k_neighbors=30):
     else:
         raise FileNotFoundError(f"未找到 {dataname} 的数据文件,仅支持 .npy / .xyz / .ply")
 
-    # ---- PCA 法线估计 ----
+    # ---------- PCA 法线估计 ----------
     pcd_pca = o3d.geometry.PointCloud()
     pcd_pca.points = o3d.utility.Vector3dVector(points)
     pcd_pca.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=k_neighbors))
     pcd_pca.orient_normals_consistent_tangent_plane(k_neighbors)
     normals_pca = np.asarray(pcd_pca.normals, dtype=np.float32)
 
-    # ---- 如果没有输入法线 -> 返回空点云 ----
+    # ---------- 如果没有输入法线 ----------
     if normals is None:
-        return points, normals_pca, trimesh.points.PointCloud(np.empty((0, 3)))
+        return points, None, normals_pca, trimesh.points.PointCloud(np.empty((0, 3))), {}
 
-    # ---- 有输入法线 -> 计算误差并上色 ----
+    # ---------- 有输入法线 -> 计算误差 ----------
     ni = normals.copy()
     npca = normals_pca.copy()
     ni /= np.linalg.norm(ni, axis=1, keepdims=True) + 1e-12
     npca /= np.linalg.norm(npca, axis=1, keepdims=True) + 1e-12
 
-    cos_val = np.sum(ni * npca, axis=1)
+    cos_val = np.abs(np.sum(ni * npca, axis=1))
     cos_val = np.clip(cos_val, 0.0, 1.0)
     angle_deg = np.degrees(np.arccos(cos_val))
 
-    # 映射到颜色
+    # ---------- 统计指标 ----------
+    mean_error = np.mean(angle_deg)
+    median_error = np.median(angle_deg)
+    std_error = np.std(angle_deg)
+    max_error = np.max(angle_deg)
+    error_stats = {
+        "mean": float(mean_error),
+        "median": float(median_error),
+        "std": float(std_error),
+        "max": float(max_error),
+    }
+
+    # ---------- 映射到颜色 ----------
     vmax_deg = 60.0
     norm = colors.Normalize(vmin=0.0, vmax=float(vmax_deg))
     cmap = cm.get_cmap("jet")
@@ -421,4 +437,4 @@ def load_input(data_dir, dataname, k_neighbors=30):
     pcd_pca.colors = o3d.utility.Vector3dVector(col)
     error_pcd = trimesh.points.PointCloud(vertices=points, colors=(col * 255).astype(np.uint8))
 
-    return points, normals, normals_pca, error_pcd
+    return points, normals, normals_pca, error_pcd, error_stats

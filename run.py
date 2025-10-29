@@ -119,6 +119,13 @@ class Runner:
         self.epochs_stage_1 = self.conf.get_int("train.epochs_stage_1")
         self.epochs_stage_2 = self.conf.get_int("train.epochs_stage_2")
         self.epochs = self.epochs_stage_1 + self.epochs_stage_2
+
+        self.learning_rate_stage1 = self.conf.get_float("train.learning_rate_stage1")
+        self.learning_rate_stage2 = self.conf.get_float("train.learning_rate_stage2")
+
+        self.warm_up_end_stage1 = self.conf.get_int("train.warm_up_end_stage1")
+        self.warm_up_end_stage2 = self.conf.get_int("train.warm_up_end_stage2")
+
         self.metric = self.conf.get_string("train.metric")
         self.epoch_step = 0
 
@@ -126,17 +133,15 @@ class Runner:
         self.time_sum = self.conf.get_int("train.time_sum")
         self.report_freq = self.conf.get_int("train.report_freq")
         self.batch_size = self.conf.get_int("train.batch_size")
-        self.learning_rate = self.conf.get_float("train.learning_rate")
-        # 学习率预热阶段
-        self.warm_up_end = self.conf.get_float("train.warm_up_end", default=0.0)
         # 产生额外点云的数量
-        self.extra_points = self.conf.get_int("train.extra_points")
+        self.extra_points_rate = self.conf.get_int("train.extra_points_rate")
+        self.noise_range = self.conf.get_float("train.noise_range")
 
         # Networks
         self.udf_network = CAPUDFNetwork(**self.conf["model.udf_network"]).to(self.device)
 
         # Initialize optimizer
-        self.optimizer = torch.optim.Adam(self.udf_network.parameters(), lr=self.learning_rate)
+        self.optimizer = torch.optim.Adam(self.udf_network.parameters(), lr=self.learning_rate_stage1)
 
     def train(self):
         log_dir = self.base_exp_dir / "log"
@@ -157,6 +162,23 @@ class Runner:
             logger=self.logger,
         )
         (self.base_exp_dir / "pointcloud").mkdir(parents=True, exist_ok=True)
+        self.error_stats = self.dataset_stage_1.error_stats
+        self.error_pointcloud = self.dataset_stage_1.error_pointcloud
+        if len(self.error_pointcloud.vertices) == 0:
+            print_log("No Normals loaded.", logger=self.logger)
+        else:
+            error_pointcloud_path = self.base_exp_dir / "pointcloud" / "pca_error_point_cloud.ply"
+            self.error_pointcloud.export(error_pointcloud_path)
+            print_log(
+                f"pca Error point cloud saved at {error_pointcloud_path}.",
+                logger=self.logger,
+            )
+            print_log("pca_Normal Error Stats:")
+            print_log(f"Mean={self.error_stats['mean']:.6f}", logger=self.logger)
+            print_log(f"Median={self.error_stats['median']:.6f}", logger=self.logger)
+            print_log(f"Std={self.error_stats['std']:.6f}", logger=self.logger)
+            print_log(f"Max={self.error_stats['max']:.6f}", logger=self.logger)
+
         n_parameters = count_parameters(self.udf_network)
         print_log(
             f"Number of parameters in UDF network: {n_parameters}",
@@ -182,7 +204,7 @@ class Runner:
             # Stage 1 生成新的点
             for _, data in enumerate(self.dataloader_stage_1):
                 # data [4,5000,3]
-                self.update_learning_rate(self.epoch_step)
+                self.update_learning_rate(self.epoch_step, self.epochs_stage_1, self.epochs_stage_2)
                 (
                     sample,
                     sample_time,
@@ -238,8 +260,21 @@ class Runner:
         if self.epoch_step == self.epochs_stage_1:
             self.stage = 2
             print_log("进入第二阶段训练", logger=self.logger)
-            extra_points, extra_normals = self.get_extra_points(self.extra_points)
-            estimate_error_pointcloud = self.dataset_stage_2.get_new_pointcloud(extra_points, extra_normals)
+            # 先生成过量点云
+            extra_points, extra_normals = self.get_extra_points(
+                int(self.extra_points_rate * self.GT_points.shape[0]),
+                self.noise_range,
+            )
+            # 基于泊松盘采集均匀的点云
+            # idx = pcu.downsample_point_cloud_poisson_disk(
+            #     all_extra_points,
+            #     num_samples=int(self.extra_points_rate * self.GT_points.shape[0]),
+            # )
+            # extra_points = all_extra_points[idx]
+            # extra_normals = all_extra_normals[idx]
+            (estimate_error_pointcloud, estimate_error_stats) = self.dataset_stage_2.get_new_pointcloud(
+                extra_points, extra_normals
+            )
             estimate_error_pointcloud_path = (
                 self.base_exp_dir / "pointcloud" / f"estimate_error_cloud{self.epoch_step}_{self.time_sum}epoch.ply"
             )
@@ -249,6 +284,11 @@ class Runner:
                 f"Estimate_Error_Point cloud saved successfully at epoch {self.epoch_step}. File path: {estimate_error_pointcloud_path}",
                 logger=self.logger,
             )
+            print_log("estimate_Normal Error Stats:")
+            print_log(f"Mean={estimate_error_stats['mean']:.6f}", logger=self.logger)
+            print_log(f"Median={estimate_error_stats['median']:.6f}", logger=self.logger)
+            print_log(f"Std={estimate_error_stats['std']:.6f}", logger=self.logger)
+            print_log(f"Max={estimate_error_stats['max']:.6f}", logger=self.logger)
             new_point_cloud = trimesh.Trimesh(
                 vertices=self.dataset_stage_2.points,
             )
@@ -274,7 +314,7 @@ class Runner:
         while self.epoch_step < self.epochs:
             # data [4,5000,3]
             for _, data in enumerate(self.dataloader_stage_2):
-                self.update_learning_rate(self.epoch_step)
+                self.update_learning_rate(self.epoch_step, self.epochs_stage_1, self.epochs_stage_2)
                 (
                     sample,  # noqa: F841
                     sample_time,
@@ -425,17 +465,83 @@ class Runner:
             logger=self.logger,
         )
 
-    def update_learning_rate(self, epoch_step):
-        warn_up = self.warm_up_end
-        max_epoch = self.epochs
-        init_lr = self.learning_rate
-        lr = (
-            (epoch_step / warn_up)
-            if epoch_step < warn_up
-            else 0.5 * (math.cos((epoch_step - warn_up) / (max_epoch - warn_up) * math.pi) + 1)
-        )
-        lr = lr * init_lr
+    # def update_learning_rate(self, epoch_step):
+    #     warn_up = self.warm_up_end
+    #     max_epoch = self.epochs
+    #     init_lr = self.learning_rate
+    #     lr = (
+    #         (epoch_step / warn_up)
+    #         if epoch_step < warn_up
+    #         else 0.5 * (math.cos((epoch_step - warn_up) / (max_epoch - warn_up) * math.pi) + 1)
+    #     )
+    #     lr = lr * init_lr
 
+    #     for g in self.optimizer.param_groups:
+    #         g["lr"] = lr
+    def update_learning_rate(self, epoch_step, epochs_stage_1, epochs_stage_2):
+        """
+        多阶段学习率调度:
+        - 阶段1: 从 epoch_step=0 到 epoch_step=epochs_stage_1-1
+            warmup -> 余弦下降
+            初始学习率: self.learning_rate_stage1
+        - 阶段2: 从 epoch_step=epochs_stage_1 到 epochs_stage_1+epochs_stage_2-1
+            warmup -> 余弦下降
+            初始学习率: self.learning_rate_stage2
+
+        参数
+        ----
+        epoch_step: int
+            当前的全局 epoch 序号,比如第几轮训练了
+        epochs_stage_1: int
+            第一阶段的总 epoch 数
+        epochs_stage_2: int
+            第二阶段的总 epoch 数
+        """
+
+        # ====== 配置两个阶段的超参数 ======
+        # 每个阶段各自的初始lr
+        lr_stage1 = self.learning_rate_stage1  # 需要在 __init__ 里定义
+        lr_stage2 = self.learning_rate_stage2  # 需要在 __init__ 里定义
+
+        # 每个阶段各自的 warmup 轮数
+        warmup_stage1 = min(self.warm_up_end_stage1, epochs_stage_1)
+        warmup_stage2 = min(self.warm_up_end_stage2, epochs_stage_2)
+
+        # ====== 判定当前属于哪个阶段 ======
+        if epoch_step < epochs_stage_1:
+            # ------- 阶段 1 -------
+            local_epoch = epoch_step  # 阶段内的第几轮
+            max_epoch_this_stage = epochs_stage_1
+            warmup_this_stage = warmup_stage1
+            base_lr = lr_stage1
+
+        else:
+            # ------- 阶段 2 -------
+            local_epoch = epoch_step - epochs_stage_1  # 把计数重置到该阶段起点
+            max_epoch_this_stage = epochs_stage_2
+            warmup_this_stage = warmup_stage2
+            base_lr = lr_stage2
+
+        # ====== 计算该阶段内的学习率 ======
+        if local_epoch < warmup_this_stage and warmup_this_stage > 0:
+            # 线性 warmup: 从 0 -> base_lr
+            lr_factor = float(local_epoch) / float(warmup_this_stage)
+        else:
+            # 余弦退火:
+            # local_epoch 从 warmup_this_stage ... max_epoch_this_stage-1
+            # 先把它平移到从0开始计
+            t = local_epoch - warmup_this_stage
+            T = max_epoch_this_stage - warmup_this_stage
+            # 防止除0 (比如没有warmup 或阶段长度==warmup长度)
+            if T <= 0:
+                lr_factor = 1.0
+            else:
+                # 0.5 * (1 + cos(pi * t / T))
+                lr_factor = 0.5 * (1.0 + math.cos(math.pi * t / T))
+
+        lr = base_lr * lr_factor
+
+        # ====== 写回 optimizer ======
         for g in self.optimizer.param_groups:
             g["lr"] = lr
 
@@ -482,7 +588,7 @@ class Runner:
             logger=self.logger,
         )
 
-    def get_extra_points(self, extra_points):
+    def get_extra_points(self, extra_points, noise_range):
         batch_size = 10000
         all_extra_points = []
         all_extra_normals = []
@@ -495,7 +601,7 @@ class Runner:
             # Gaussian noise points
             sample_surface = self.dataset_stage_1.points[current_indices]
             sample_sigmas = self.dataset_stage_1.sigmas[current_indices]
-            theta_guassian = 0.25
+            theta_guassian = 0.25 * noise_range
             noise = np.random.normal(0.0, 1.0, size=(current_indices.shape[0], 3)).astype(np.float32)
             sample = sample_surface + theta_guassian * sample_sigmas * noise
             sample = torch.from_numpy(sample).to(self.device).float()

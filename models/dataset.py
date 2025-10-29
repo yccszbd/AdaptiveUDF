@@ -21,7 +21,7 @@ class Dataset(Dataset):
         self.datalength = conf.get_int("train.datalength")
         self.metric = conf.get_string("train.metric")
         self.time_sum = conf.get_int("train.time_sum")
-        self.points, gt_normals, _, self.error_pointcloud = load_input(self.data_dir, dataname)
+        self.points, gt_normals, _, self.error_pointcloud, self.error_stats = load_input(self.data_dir, dataname)
         self.normals = []
         self.gt_normals = gt_normals
         self.num_points = self.points.shape[0]
@@ -42,17 +42,17 @@ class Dataset(Dataset):
         sample_surface = self.points[point_idxes]
         sample_sigmas = self.sigmas[point_idxes]
         theta_guassian = 0.25
-        noise = np.random.normal(0.0, 1.0, size=(train_num_points, 3)).astype(np.float32)
-        sample = sample_surface + theta_guassian * sample_sigmas * noise
-        # sample_near = self.projection(sample)
-        # sample_near = self.bilateral_projection_protection(sample)
 
         if self.stage == 1:
+            noise = np.random.normal(0.0, 1.0, size=(train_num_points, 3)).astype(np.float32)
+            sample = sample_surface + theta_guassian * sample_sigmas * noise
             sample_near_index = self.kd_tree.query(sample, k=1)[1]
             sample_near = self.points[sample_near_index]
         else:
-            sample_near_index = self.kd_tree.query(sample, k=1)[1]
-        sample_near = self.points[sample_near_index]
+            sample_normals = self.normals[point_idxes]
+            noise = np.random.normal(0.0, 1.0, size=(train_num_points, 1)).astype(np.float32)  # (N,1)
+            sample = sample_surface + theta_guassian * sample_sigmas * noise * sample_normals
+            sample_near = sample_surface
         res = sample - sample_near  # (N,3)
         time = np.random.randint(0, self.time_sum, size=(train_num_points, 1))
 
@@ -93,38 +93,73 @@ class Dataset(Dataset):
         return self.error_pointcloud
 
     def get_new_pointcloud(self, extra_points, extra_normals):
+        K = 8  # 最近邻数量
+
+        # --- Step 1: 建树并查询 ---
         self.extra_kdtree = cKDTree(extra_points)
-        extra_idx = self.extra_kdtree.query(self.points, k=1)[1]
-        self.normals = extra_normals[extra_idx].astype(np.float32)
-        # 计算点云法线图
+        dist, idx = self.extra_kdtree.query(self.points, k=K)
+
+        # --- Step 2: 取邻居法向量 ---
+        neighbor_normals = extra_normals[idx]  # shape: (N, K, 3)
+
+        # --- Step 3: 定向对齐 ---
+        ref_normals = neighbor_normals[:, 0, :]  # 参考方向
+        sign = np.sign(np.sum(neighbor_normals * ref_normals[:, None, :], axis=2))
+        sign[sign == 0] = 1
+        aligned_normals = neighbor_normals * sign[..., None]
+
+        # --- Step 4: 距离加权平均 ---
+        weights = 1.0 / (dist + 1e-8)
+        weights = weights / weights.sum(axis=1, keepdims=True)
+        avg_normals = np.sum(aligned_normals * weights[..., None], axis=1)
+
+        # --- Step 5: 单位化 ---
+        norm = np.linalg.norm(avg_normals, axis=1, keepdims=True) + 1e-12
+        avg_normals = avg_normals / norm
+        self.normals = avg_normals.astype(np.float32)
+
+        # --- Step 6: 计算法线误差 ---
         ni = self.normals.copy()
         n_gt = self.gt_normals.copy()
         ni /= np.linalg.norm(ni, axis=1, keepdims=True) + 1e-12
         n_gt /= np.linalg.norm(n_gt, axis=1, keepdims=True) + 1e-12
         cos_val = np.sum(ni * n_gt, axis=1)
         cos_val = np.clip(np.abs(cos_val), 0.0, 1.0)
-        angle_deg = np.degrees(np.arccos(cos_val))
+        angle_deg = np.degrees(np.arccos(cos_val))  # 每个点的法线夹角误差
 
-        # --- 3. 颜色映射 (Matplotlib + Numpy) ---
+        # --- Step 7: 统计指标 ---
+        mean_error = np.mean(angle_deg)  # 平均误差
+        median_error = np.median(angle_deg)  # 中位误差
+        std_error = np.std(angle_deg)  # 标准差
+        max_error = np.max(angle_deg)  # 最大误差
+
+        normal_error_stats = {
+            "mean": float(mean_error),
+            "median": float(median_error),
+            "std": float(std_error),
+            "max": float(max_error),
+        }
+
+        # --- Step 8: 颜色映射 (Matplotlib + Numpy) ---
         vmax_deg = 60.0
         norm = colors.Normalize(vmin=0.0, vmax=float(vmax_deg))
         cmap = cm.get_cmap("jet")
-        # 'col' 是 [0, 1] 范围的 float
         col = cmap(norm(np.clip(angle_deg, 0.0, vmax_deg)))[:, :3]
-
-        # 转换为 [0, 255] 范围的 uint8
         col_uint8 = (col * 255).astype(np.uint8)
 
-        # --- 4. 创建 Trimesh 点云对象 (Trimesh) ---
+        # --- Step 9: 创建 Trimesh 点云对象 ---
         estimate_error_pointcloud = trimesh.points.PointCloud(vertices=self.points, colors=col_uint8)
 
+        # --- Step 10: 更新点云并返回 ---
         self.normals = np.concatenate([self.normals, extra_normals], axis=0)
         self.points = np.concatenate([self.points, extra_points], axis=0)
         self.num_points = self.points.shape[0]
         self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
         self.kd_tree = cKDTree(self.points)
-        return estimate_error_pointcloud
+
+        # 返回误差可视化点云 + 统计指标
+        return estimate_error_pointcloud, normal_error_stats
 
     def set_point_cloud(self, points, normals):
         self.points = points
