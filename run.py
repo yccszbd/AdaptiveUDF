@@ -198,7 +198,7 @@ class Runner:
         # batch是最大的范围,表示一共训练多少轮
         # iter是从dataloader中取数据的次数
         # 一个batch有多少个iter由dataloader的长度决定,len(dataloader)=len(dataset)/batchsize
-        self.stage = 1
+        self.stage = 1 if self.epoch_step < self.epochs_stage_1 else 2
         while self.epoch_step < self.epochs_stage_1:
             # For each batch in the dataloader
             # Stage 1 生成新的点
@@ -290,7 +290,7 @@ class Runner:
             print_log(f"Std={estimate_error_stats['std']:.6f}", logger=self.logger)
             print_log(f"Max={estimate_error_stats['max']:.6f}", logger=self.logger)
             new_point_cloud = trimesh.Trimesh(
-                vertices=self.dataset_stage_2.points,
+                vertices=self.dataset_stage_2.points, vertex_normals=self.dataset_stage_2.normals
             )
             new_point_cloud_path = (
                 self.base_exp_dir / "pointcloud" / f"new_point_cloud{self.epoch_step}_{self.time_sum}epoch.ply"

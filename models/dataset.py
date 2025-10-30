@@ -37,22 +37,49 @@ class Dataset(Dataset):
         alphas_cumsum = np.clip(np.cumsum(alphas, axis=0), 0, 1)
         point_idxes_permutation = np.random.permutation(self.points.shape[0])
         train_num_points = self.train_num_points
-        point_idxes = point_idxes_permutation[:train_num_points]
-        # Gaussian noise points
-        sample_surface = self.points[point_idxes]
-        sample_sigmas = self.sigmas[point_idxes]
-        theta_guassian = 0.25
+        # point_idxes = point_idxes_permutation[:train_num_points]
+        # # Gaussian noise points
+        # sample_surface = self.points[point_idxes]
+        # sample_sigmas = self.sigmas[point_idxes]
+        # theta_guassian = 0.25
 
         if self.stage == 1:
+            point_idxes = point_idxes_permutation[:train_num_points]
+            # Gaussian noise points
+            sample_surface = self.points[point_idxes]
+            sample_sigmas = self.sigmas[point_idxes]
+            theta_guassian = 0.25
             noise = np.random.normal(0.0, 1.0, size=(train_num_points, 3)).astype(np.float32)
             sample = sample_surface + theta_guassian * sample_sigmas * noise
             sample_near_index = self.kd_tree.query(sample, k=1)[1]
             sample_near = self.points[sample_near_index]
         else:
-            sample_normals = self.normals[point_idxes]
-            noise = np.random.normal(0.0, 1.0, size=(train_num_points, 1)).astype(np.float32)  # (N,1)
-            sample = sample_surface + theta_guassian * sample_sigmas * noise * sample_normals
-            sample_near = sample_surface
+            num_gaussian = int(self.train_num_points * 0.5)
+            num_alongNormal = self.train_num_points - num_gaussian
+            point_gaussian_idxes = point_idxes_permutation[:num_gaussian]
+            point_alongNormal_idxes = point_idxes_permutation[num_gaussian : self.train_num_points]
+            # Gaussian noise points
+            sample_gaussian_surface = self.points[point_gaussian_idxes]
+            sample_gaussian_sigmas = self.sigmas[point_gaussian_idxes]
+            theta_guassian = 0.25
+            noise_gaussian = np.random.normal(0.0, 1.0, size=(num_gaussian, 3)).astype(np.float32)
+            sample_gaussian = sample_gaussian_surface + theta_guassian * sample_gaussian_sigmas * noise_gaussian
+            _, nearest_idx = self.kd_tree.query(sample_gaussian, k=1)
+            sample_gaussian_near = self.points[nearest_idx]
+            # sample_gaussian_near = sample_gaussian_surface
+            # Along normal points
+            sample_alongNormal_surface = self.points[point_alongNormal_idxes]
+            sample_alongNormal_sigmas = self.sigmas[point_alongNormal_idxes]
+            sample_alongNormal_normals = self.normals[point_alongNormal_idxes]
+            theta_alongNormal = 0.25
+            noise_alongNormal = np.random.normal(0.0, 1.0, size=(num_alongNormal, 1)).astype(np.float32)  # (N,1)
+            sample_alongNormal = (
+                sample_alongNormal_surface
+                + theta_alongNormal * sample_alongNormal_sigmas * noise_alongNormal * sample_alongNormal_normals
+            )
+            sample_alongNormal_near = sample_alongNormal_surface
+            sample = np.concatenate([sample_gaussian, sample_alongNormal], axis=0)
+            sample_near = np.concatenate([sample_gaussian_near, sample_alongNormal_near], axis=0)
         res = sample - sample_near  # (N,3)
         time = np.random.randint(0, self.time_sum, size=(train_num_points, 1))
 
@@ -154,7 +181,6 @@ class Dataset(Dataset):
         self.normals = np.concatenate([self.normals, extra_normals], axis=0)
         self.points = np.concatenate([self.points, extra_points], axis=0)
         self.num_points = self.points.shape[0]
-        self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
         self.kd_tree = cKDTree(self.points)
 
