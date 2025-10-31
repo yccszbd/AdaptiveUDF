@@ -27,7 +27,7 @@ class Dataset(Dataset):
         self.num_points = self.points.shape[0]
         self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
-        self.bbox = np.array([np.min(self.points, axis=0), np.max(self.points, axis=0)])
+        self.bbox = np.array([np.min(self.points - 0.05, axis=0), np.max(self.points + 0.05, axis=0)])
 
     def __len__(self):
         return self.datalength
@@ -200,7 +200,7 @@ class Dataset(Dataset):
         self.num_points = self.points.shape[0]
         self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
-        self.bbox = np.array([np.min(self.points, axis=0), np.max(self.points, axis=0)])
+        self.bbox = np.array([np.min(self.points - 0.05, axis=0), np.max(self.points + 0.05, axis=0)])
 
     def bilateral_projection(self, query, k=10, sigma_p=None, sigma_n=None):
         M = query.shape[0]
