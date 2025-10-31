@@ -119,12 +119,16 @@ class Dataset(Dataset):
     def get_error_pointcloud(self):
         return self.error_pointcloud
 
-    def get_new_pointcloud(self, extra_points, extra_normals):
-        K = 8  # 最近邻数量
+    def get_new_points(self, extra_points, extra_normals):
+        K = 1  # 最近邻数量
 
         # --- Step 1: 建树并查询 ---
         self.extra_kdtree = cKDTree(extra_points)
         dist, idx = self.extra_kdtree.query(self.points, k=K)
+
+        if K == 1:
+            dist = dist[:, np.newaxis]  # shape (N,) → (N, 1)
+            idx = idx[:, np.newaxis]  # shape (N,) → (N, 1)
 
         # --- Step 2: 取邻居法向量 ---
         neighbor_normals = extra_normals[idx]  # shape: (N, K, 3)
@@ -178,8 +182,10 @@ class Dataset(Dataset):
         estimate_error_pointcloud = trimesh.points.PointCloud(vertices=self.points, colors=col_uint8)
 
         # --- Step 10: 更新点云并返回 ---
-        self.normals = np.concatenate([self.normals, extra_normals], axis=0)
-        self.points = np.concatenate([self.points, extra_points], axis=0)
+        # 不加点云
+        # self.normals = np.concatenate([self.normals, extra_normals], axis=0)
+        # self.points = np.concatenate([self.points, extra_points], axis=0)
+
         self.num_points = self.points.shape[0]
         self.sigmas = self.sample_gaussian_noise_around_shape()
         self.kd_tree = cKDTree(self.points)
@@ -187,13 +193,14 @@ class Dataset(Dataset):
         # 返回误差可视化点云 + 统计指标
         return estimate_error_pointcloud, normal_error_stats
 
-    def set_point_cloud(self, points, normals):
+    def set_point_cloud(self, points, normals, stage):
+        self.stage = stage
         self.points = points
         self.normals = normals
         self.num_points = self.points.shape[0]
         self.normalize()
         self.sigmas = self.sample_gaussian_noise_around_shape()
-        self.kd_tree = cKDTree(self.points)
+        self.bbox = np.array([np.min(self.points, axis=0), np.max(self.points, axis=0)])
 
     def bilateral_projection(self, query, k=10, sigma_p=None, sigma_n=None):
         M = query.shape[0]

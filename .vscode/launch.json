@@ -20,7 +20,7 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "args": [
-        "--gpu", "1",
+        "--gpu", "0",
         "--conf", "confs/shapenet_cars.conf",
         "--dir", "shapenetCars",
         "--dataname", "27d42437168ccd7ddd75f724c0ccbe00"
