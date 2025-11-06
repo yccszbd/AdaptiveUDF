@@ -35,7 +35,7 @@ echo "===== $(date) : 开始全部训练，日志写入 ${logfile} =====" >> "$l
 for h in "${dataname[@]}"; do 
     echo "===== $(date) : 启动 shapenetCars ${h} =====" >> "$logfile"
     stdbuf -oL -eL python run.py \
-        --gpu 0 \
+        --gpu 1 \
         --conf "confs/shapenet_cars.conf" \
         --dir "shapenetCars" \
         --dataname "$h" \
