@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -438,3 +439,40 @@ def load_input(data_dir, dataname, k_neighbors=30):
     error_pcd = trimesh.points.PointCloud(vertices=points, colors=(col * 255).astype(np.uint8))
 
     return points, normals, normals_pca, error_pcd, error_stats
+
+
+def back_up_code(code_root, save_root):
+    code_root = Path(code_root).resolve()
+    save_root = Path(save_root).resolve()
+
+    if not code_root.exists():
+        raise FileNotFoundError(f"root doesnt exist: {code_root}")
+
+    save_root.mkdir(parents=True, exist_ok=True)
+    save_root.mkdir(exist_ok=True)
+
+    include_names = ["models", "tools", "confs", "scripts", "run.py"]
+
+    for name in include_names:
+        src_path = code_root / name
+        dst_path = save_root / name
+
+        if not src_path.exists():
+            print(f"not find: {src_path}")
+            continue
+
+        try:
+            if src_path.is_dir():
+                shutil.copytree(
+                    src_path,
+                    dst_path,
+                    ignore=shutil.ignore_patterns(
+                        "__pycache__", "*.pyc", "*.pt", "*.pth", "*.log", ".git", ".vscode", "runs", "outputs"
+                    ),
+                )
+            else:
+                shutil.copy2(src_path, dst_path)
+        except Exception as e:
+            print(f"backup failed {name}: {e}")
+
+    print("backup complete.")

@@ -15,6 +15,7 @@ from tools.logger import get_root_logger, print_log
 from tools.slice import save_all_slice_views
 from tools.surface_extraction import surface_extraction
 from tools.utils import (
+    back_up_code,
     conf_log,
     count_parameters,
     eval_pointcloud,
@@ -127,6 +128,10 @@ class Runner:
         self.optimizer = torch.optim.Adam(self.udf_network.parameters(), lr=self.learning_rate_stage1)
 
     def train(self):
+        # 保存代码
+        save_root = self.base_exp_dir / "code"
+        code_root = Path("./")
+        back_up_code(code_root, save_root)
         # 记录log
         log_dir = self.base_exp_dir / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -527,14 +532,30 @@ class Runner:
             gt_file = gt_base.with_suffix(".xyz")
         else:
             raise FileNotFoundError(f"找不到 ground truth 文件: {gt_base}.[ply|obj|xyz]")
+        input_base = data_dir / self.dir / "input" / self.dataname
+        input_file = None
+        if (input_base.with_suffix(".ply")).is_file():
+            input_file = input_base.with_suffix(".ply")
+        elif (input_base.with_suffix(".obj")).is_file():
+            input_file = input_base.with_suffix(".obj")
+        elif (input_base.with_suffix(".xyz")).is_file():
+            input_file = input_base.with_suffix(".xyz")
+
+        if input_file is None:
+            print_log(
+                f"Warning: Could not find input file at {input_base}.[ply|obj|xyz]. 将回退到使用 GT 进行归一化。",
+                logger=self.logger,
+            )
         pred_file = self.base_exp_dir / "mesh" / f"{self.epoch_step}_{self.time_sum}epoch_mesh.obj"
         print_log(f"pred_file:{pred_file}", logger=self.logger)
         print_log(f"gt_file:{gt_file}", logger=self.logger)
         gt_mesh = trimesh.load_mesh(gt_file)
         pred_mesh = trimesh.load_mesh(pred_file)
         gt_mesh = normalize_mesh(gt_mesh)
-        total_size = (gt_mesh.bounds[1] - gt_mesh.bounds[0]).max()
-        centers = (gt_mesh.bounds[1] + gt_mesh.bounds[0]) / 2
+        print_log(f"使用 input file 进行归一化: {input_file}", logger=self.logger)
+        inputshape = trimesh.load(input_file)
+        total_size = (inputshape.bounds[1] - inputshape.bounds[0]).max()
+        centers = (inputshape.bounds[1] + inputshape.bounds[0]) / 2
         pred_mesh.apply_scale(total_size)
         pred_mesh.apply_translation(centers)
 

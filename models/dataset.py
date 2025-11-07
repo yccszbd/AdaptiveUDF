@@ -53,8 +53,9 @@ class Dataset(Dataset):
             sample = sample_surface + theta_guassian * sample_sigmas * noise
             sample_near_index = self.kd_tree.query(sample, k=1)[1]
             sample_near = self.points[sample_near_index]
+            # sample_near = self.emd_projection(sample)
         else:
-            num_gaussian = int(self.train_num_points * 0.5)
+            num_gaussian = int(self.train_num_points * 0.0)
             num_alongNormal = self.train_num_points - num_gaussian
             point_gaussian_idxes = point_idxes_permutation[:num_gaussian]
             point_alongNormal_idxes = point_idxes_permutation[num_gaussian : self.train_num_points]
@@ -64,8 +65,10 @@ class Dataset(Dataset):
             theta_guassian = 0.25
             noise_gaussian = np.random.normal(0.0, 1.0, size=(num_gaussian, 3)).astype(np.float32)
             sample_gaussian = sample_gaussian_surface + theta_guassian * sample_gaussian_sigmas * noise_gaussian
+            # sample_gaussian_near = self.bilateral_projection(sample_gaussian)
             _, nearest_idx = self.kd_tree.query(sample_gaussian, k=1)
             sample_gaussian_near = self.points[nearest_idx]
+            # sample_gaussian_near = self.emd_projection(sample_gaussian)
             # sample_gaussian_near = sample_gaussian_surface
             # Along normal points
             sample_alongNormal_surface = self.points[point_alongNormal_idxes]
