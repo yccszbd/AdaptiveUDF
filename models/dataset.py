@@ -55,7 +55,7 @@ class Dataset(Dataset):
             sample_near = self.points[sample_near_index]
             # sample_near = self.emd_projection(sample)
         else:
-            num_gaussian = int(self.train_num_points * 0.0)
+            num_gaussian = int(self.train_num_points * 0.5)
             num_alongNormal = self.train_num_points - num_gaussian
             point_gaussian_idxes = point_idxes_permutation[:num_gaussian]
             point_alongNormal_idxes = point_idxes_permutation[num_gaussian : self.train_num_points]

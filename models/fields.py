@@ -31,13 +31,19 @@ class CAPUDFNetwork(nn.Module):
 
         self.embed_fn_fine = None
         self.pe_t = TimeStepEncoding()
-        self.timestep_emb = nn.Sequential(nn.Sigmoid(), nn.Linear(20, 2))
+
         if multires > 0:
             embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
             # embed_fn是特征转高频模块,multires表示转的高频模块的频率上线,最高sin4x则multires=4,输出的特征为[x,sinx,cosx,sin2x,cos2x,sin3x,cos3x,sin4x,cos4x],维度一共为3*(1+2*multires)
             self.embed_fn_fine = embed_fn
             dims[0] = input_ch
-
+        # self.timestep_emb = nn.Sequential(nn.Sigmoid(), nn.Linear(20, 2))
+        self.timestep_emb = nn.Sequential(nn.Sigmoid(), nn.Linear(20, 2 * input_ch))
+        # self.timestep_emb1 = nn.Sequential(
+        #     nn.Linear(20, d_hidden),
+        #     nn.ReLU(),
+        #     nn.Linear(d_hidden, (d_hidden // 2) * 2),
+        # )
         self.num_layers = len(dims)
         # len(dims) = 10
         self.skip_in = skip_in
@@ -180,7 +186,7 @@ class CAPUDFNetwork(nn.Module):
 
 class TimeStepEncoding:
     """
-    位置编码类,用于将输入的位置向量进行频率编码。
+    时间步骤编码类,用于将输入的时间进行频率编码。
     方法:
       __init__():
         初始化位置编码类,设置频率带的范围。
@@ -209,7 +215,8 @@ class TimeStepEncoding:
         if p.dim() == 1:
             p = p.unsqueeze(-1)
         out = []
-        p = (p - 5) / 5.0
+        # p = (p - 5) / 5.0
+        p = (p - 2.5) / 5.0
         for freq in self.freq_bands:
             out.append(torch.sin(freq * p))
             out.append(torch.cos(freq * p))
