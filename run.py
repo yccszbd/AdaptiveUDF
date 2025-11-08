@@ -122,7 +122,7 @@ class Runner:
         self.noise_range = self.conf.get_float("train.noise_range")
 
         # Networks
-        self.udf_network = CAPUDFNetwork(**self.conf["model.udf_network"]).to(self.device)
+        self.udf_network = CAPUDFNetwork(self.time_sum, **self.conf["model.udf_network"]).to(self.device)
 
         # Initialize optimizer
         self.optimizer = torch.optim.Adam(self.udf_network.parameters(), lr=self.learning_rate_stage1)

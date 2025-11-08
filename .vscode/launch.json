@@ -23,7 +23,7 @@
         "--gpu", "0",
         "--conf", "confs/shapenet_cars.conf",
         "--dir", "shapenetCars",
-        "--dataname", "3bfa196d1b48f1e0c5dccef20baf829a"
+        "--dataname", "fffb1660a38af30ba4cf3601fb6b2442"
 
       ]
     },
