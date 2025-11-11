@@ -12,35 +12,51 @@ from models.embedder import get_embedder
 class CAPUDFNetwork(nn.Module):
     def __init__(
         self,
+        time_sum,
         d_in,
         d_out,
         d_hidden,
         n_layers,
         skip_in=(4,),
+        film_in=(4),
         multires=0,
         bias=0.5,
         scale=1,
         geometric_init=True,
         weight_norm=True,
         inside_outside=False,
+        learned_sinusoidal_dim=16,
     ):
         super().__init__()
-
+        self.time_sum = time_sum
         dims = [d_in] + [d_hidden for _ in range(n_layers)] + [d_out]
         # [3,256,256,256,256,256,256,256,256,1]
-
+        # self.Film_layers = [4, 8]
         self.embed_fn_fine = None
-        self.pe_t = TimeStepEncoding()
-        self.timestep_emb = nn.Sequential(nn.Sigmoid(), nn.Linear(20, 2))
+        # self.pe_t = TimeStepEncoding()
+        input_dim = dims[0]
         if multires > 0:
-            embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
+            embed_fn, input_dim = get_embedder(multires, input_dims=d_in)
             # embed_fn是特征转高频模块,multires表示转的高频模块的频率上线,最高sin4x则multires=4,输出的特征为[x,sinx,cosx,sin2x,cos2x,sin3x,cos3x,sin4x,cos4x],维度一共为3*(1+2*multires)
             self.embed_fn_fine = embed_fn
-            dims[0] = input_ch
+            dims[0] = input_dim
+
+        # 可学习的正余弦时间编码,长度设置为默认16
+        sinu_pos_emb = LearnedSinusoidalPosEmb(learned_sinusoidal_dim, self.time_sum)
+        fourier_dim = learned_sinusoidal_dim + 1
+        # 对输入层的时间调制
+        self.time_mlp1 = nn.Sequential(
+            sinu_pos_emb, nn.Linear(fourier_dim, 2 * input_dim), nn.GELU(), nn.Linear(2 * input_dim, 2 * input_dim)
+        )
+        # 对线性层的的时间调制
+        self.time_mlp2 = nn.Sequential(
+            sinu_pos_emb, nn.Linear(fourier_dim, 2 * d_hidden), nn.GELU(), nn.Linear(2 * d_hidden, 2 * d_hidden)
+        )
 
         self.num_layers = len(dims)
         # len(dims) = 10
         self.skip_in = skip_in
+        self.film_in = film_in
         self.scale = scale
         # dims[0]=3,这设置9层
         for l in range(self.num_layers - 1):  # noqa: E741
@@ -87,33 +103,31 @@ class CAPUDFNetwork(nn.Module):
         # self.activation = nn.Softplus(beta=100)
         self.activation = nn.ReLU()
 
-        self.act_last = nn.Sigmoid()
-
     def forward(self, query, time):
         query = query * self.scale
         if self.embed_fn_fine is not None:
             query = self.embed_fn_fine(query)
         q_feature = query
-        timestep_emb = self.pe_t(time)
-        # time:[B, Q,1],timestep_emb: [B, Q,20]
-        emb_out = self.timestep_emb(timestep_emb)
-        scale, shift = torch.chunk(emb_out, 2, dim=-1)
-        q_feature = q_feature * (1 + scale) + shift
+        time_emb_1 = self.time_mlp1(time)
+        scale_1, shift_1 = torch.chunk(time_emb_1, 2, dim=-1)
+        q_feature = q_feature * (1 + scale_1) + shift_1
+        time_emb_2 = self.time_mlp2(time)
+        scale_2, shift_2 = torch.chunk(time_emb_2, 2, dim=-1)
 
         for l in range(self.num_layers - 1):  # noqa: E741
             lin = getattr(self, "lin" + str(l))
 
             if l in self.skip_in:
                 q_feature = torch.cat([q_feature, query], -1) / np.sqrt(2)
+            if l in self.film_in:
+                q_feature = q_feature * (1 + scale_2) + shift_2
             # 保证整体方差一致
             q_feature = lin(q_feature)
 
             if l < self.num_layers - 2:
                 q_feature = self.activation(q_feature)
 
-        # x = self.act_last(x)
         res = torch.abs(q_feature)
-        # res = 1 - torch.exp(-x)
         return res / self.scale
 
     def res_udf(self, query, time):
@@ -178,40 +192,27 @@ class CAPUDFNetwork(nn.Module):
         return udf, gradient, current_points
 
 
-class TimeStepEncoding:
+class LearnedSinusoidalPosEmb(nn.Module):
     """
-    位置编码类,用于将输入的位置向量进行频率编码。
-    方法:
-      __init__():
-        初始化位置编码类,设置频率带的范围。
-      __call__(p):
-        对输入的张量 `p` 进行位置编码。
-        如果输入为一维张量,会先扩展维度。
-        输入的值会被归一化到 [-1, 1] 范围。
-        对每个频率带,算正弦和余弦值,并将结果拼接成新的张量。
-    参数:
-      无显式参数。
-    属性:
-      freq_bands (numpy.ndarray): 频率带数组,包含 2^(0) 到 2^(L-1) 的频率值,乘以 π。
-    示例:
-      >>> encoder = positional_encoding_t()
-      >>> p = torch.tensor([1.0, 2.0, 3.0])
-      >>> encoded_p = encoder(p)
-      >>> print(encoded_p)
+    一个可学习的时间编码
     """
 
-    def __init__(self):
-        L = 10
-        freq_bands = 2 ** (np.linspace(0, L - 1, L))
-        self.freq_bands = freq_bands * math.pi
+    def __init__(self, dim: int, timesum):
+        super().__init__()
+        assert dim % 2 == 0
+        self.include_input = True
+        self.half_dim = dim // 2
+        self.weights = nn.Parameter(torch.randn(self.half_dim))  # [D/2]
+        self.timesum = timesum
 
-    def __call__(self, p):
-        if p.dim() == 1:
-            p = p.unsqueeze(-1)
-        out = []
-        p = (p - 5) / 5.0
-        for freq in self.freq_bands:
-            out.append(torch.sin(freq * p))
-            out.append(torch.cos(freq * p))
-        p = torch.cat(out, dim=-1)
-        return p
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 做归一化不贴边
+        x = (2 * (x + 0.5) / self.timesum) - 1
+        # 广播: weights -> [1,1,D/2]
+        w = self.weights.view(*([1] * (x.dim() - 1)), self.half_dim)
+
+        # 相位 & 特征: [B,N,D/2] -> concat sin/cos -> [B,N,dim]
+        freqs = x * w * (2 * math.pi)
+        feat = torch.cat((freqs.sin(), freqs.cos()), dim=-1)  # [B,N,dim]
+
+        return torch.cat((x, feat), dim=-1)
